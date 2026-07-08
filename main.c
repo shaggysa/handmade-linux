@@ -1,6 +1,6 @@
 #include <stdio.h>
 
 int main(void) {
-    printf("Hello, World!\n");
+    puts("This is Handmade Hero on Linux\n");
     return 0;
 }
