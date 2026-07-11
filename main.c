@@ -3,118 +3,120 @@
 #include <sys/mman.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/Xrender.h>
 #include <stdint.h>
 
 #define internal static
 #define local_persist static
 #define global_variable static
 
-global_variable bool white_screen;
-global_variable u_int8_t *bitmap_memory;
 global_variable bool running = true;
-global_variable int bytes_per_pixel = 4;
 
-// the size of the bitmap array in bytes
-global_variable size_t bitmap_size;
+typedef struct {
+    u_int8_t *memory;
+    size_t size;
+    XImage *image;
+    Pixmap pixmap;
+    int bytes_per_pixel;
+    int window_width;
+    int window_height;
+    // pitch: handled by image->bytes_per_line
+} x_offscreen_buffer;
 
-global_variable XImage *image;
+#define BACK_BUFFER_WIDTH 1280
+#define BACK_BUFFER_HEIGHT 720
 
-unsigned long next_color(Display *display, int screen) {
-    if (white_screen) {
-        white_screen = false;
-        return WhitePixel(display, screen);
-    }
-    white_screen = true;
-    return BlackPixel(display, screen);
+internal void x_offscreen_buffer_init(x_offscreen_buffer *buf, Display* display, Drawable window, int screen) {
+    buf->bytes_per_pixel = 4;
+    buf->size = BACK_BUFFER_WIDTH * BACK_BUFFER_HEIGHT * buf->bytes_per_pixel;
+    buf->window_width = BACK_BUFFER_WIDTH;
+    buf->window_height = BACK_BUFFER_HEIGHT;
+    buf->memory = mmap(NULL, buf->size, PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    buf->pixmap = XCreatePixmap(display, window, BACK_BUFFER_WIDTH, BACK_BUFFER_HEIGHT, DefaultDepth(display, screen));
 
+    buf->image = XCreateImage(
+       display,
+       DefaultVisual(display, screen),
+       DefaultDepth(display, screen),
+       ZPixmap,
+       0,
+       (char *)buf->memory,
+       BACK_BUFFER_WIDTH,
+       BACK_BUFFER_HEIGHT,
+       32,
+       BACK_BUFFER_WIDTH * buf->bytes_per_pixel);
 }
 
-internal void render_weird_gradient(Display *display, Window window, GC graphics_ctx, int x_offset, int y_offset) {
-    int pitch = image->width * bytes_per_pixel;
-    uint8_t *row = bitmap_memory;
+internal void render_back_buffer(x_offscreen_buffer buf, Display *display, Drawable window, GC graphics_ctx) {
+    XRenderPictFormat *format = XRenderFindVisualFormat(display, DefaultVisual(display, 0));
+    XPutImage(display, buf.pixmap, graphics_ctx, buf.image, 0, 0, 0, 0, buf.image->width, buf.image->height);
+    Picture src_pict = XRenderCreatePicture(display, buf.pixmap, format, 0, NULL);
+    Picture dst_pict =  XRenderCreatePicture(display, window, format, 0, NULL);
 
-    for (int y = 0; y < image->height; ++y) {
+    double x_scale = BACK_BUFFER_WIDTH / (float)buf.window_width;
+    double y_scale = BACK_BUFFER_HEIGHT / (float)buf.window_height;
+
+    XTransform transform_matrix = {{
+        {XDoubleToFixed(x_scale), 0, 0},
+        {0, XDoubleToFixed(y_scale), 0},
+        {0, 0, XDoubleToFixed(1.0)}
+    }};
+    XRenderSetPictureTransform(display, src_pict, &transform_matrix);
+
+    XRenderSetPictureFilter(display, src_pict, "bilinear", NULL, 0);
+    XRenderComposite(display, PictOpSrc, src_pict, 0, dst_pict, 0, 0, 0, 0, 0, 0, buf.window_width, buf.window_height);
+    XRenderFreePicture(display, src_pict);
+    XRenderFreePicture(display, dst_pict);
+    XFlush(display);
+}
+
+internal void render_weird_gradient(x_offscreen_buffer buf, Display *display, Drawable window, GC graphics_ctx, int x_offset, int y_offset) {
+
+    uint8_t *row = buf.memory;
+
+    for (int y = 0; y < buf.image->height; ++y) {
         uint32_t *pixel = (uint32_t *)row;
-        for (int x = 0; x < image->width; ++x) {
+        for (int x = 0; x < buf.image->width; ++x) {
             uint8_t blue = x + x_offset;
             uint8_t green = y + y_offset;
 
             *pixel++ = green << 8 | blue;
         }
 
-        row += pitch;
-    }
-    XPutImage(display, window, graphics_ctx, image, 0, 0, 0, 0, image->width, image->height);
-    XFlush(display);
-}
-
-internal void resize_window(int width, int height) {
-    size_t new_size = width * height * bytes_per_pixel;
-
-    if (bitmap_memory == NULL) {
-        bitmap_memory = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-        bitmap_size = new_size;
-    } else if (new_size > bitmap_size) {
-        munmap(bitmap_memory, bitmap_size);
-        // allocate an array twice the required size to avoid rapid allocations when resizing the window
-        new_size *= 2;
-        bitmap_memory = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-        bitmap_size = new_size;
+        row += buf.image->bytes_per_line;
     }
 
-    image->data = (char *)bitmap_memory;
-    image->width = width;
-    image->height = height;
-    image->bytes_per_line = width * bytes_per_pixel;
+    render_back_buffer(buf, display, window, graphics_ctx);
 }
 
 int main(void) {
+
     Display* display = XOpenDisplay(0);
     Window root_window = XDefaultRootWindow(display);
-
+    
     int screen = DefaultScreen(display);
     GC graphics_ctx = XDefaultGC(display, screen);
-
-    int window_x = 0;
-    int window_y = 0;
-    int initial_width = 800;
-    int initial_height = 600;
-    int border_width = 0;
-    int window_depth = CopyFromParent;
-    int window_class = CopyFromParent;
-    Visual* window_visual = CopyFromParent;
 
     int attribute_value_mask = CWBackPixmap | CWEventMask;
     XSetWindowAttributes window_attrs = {};
     window_attrs.event_mask = StructureNotifyMask | KeyPressMask | KeyReleaseMask | ExposureMask;
 
     Window window = XCreateWindow(display, root_window,
-            window_x, window_y, initial_width, initial_height,
-            border_width, window_depth, window_class, window_visual,
+            0, 0, BACK_BUFFER_WIDTH, BACK_BUFFER_HEIGHT,
+            0, CopyFromParent, CopyFromParent, CopyFromParent,
             attribute_value_mask, &window_attrs);
 
     XMapWindow(display, window);
     XStoreName(display, window, "Handmade Hero on Linux");
 
-    image = XCreateImage(
-        display,
-        DefaultVisual(display, screen),
-        DefaultDepth(display, screen),
-        ZPixmap,
-        0,
-        NULL,
-        initial_width,
-        initial_height,
-        32,
-        0);
+    x_offscreen_buffer x_back_buffer;
+    x_offscreen_buffer_init(&x_back_buffer, display, window, screen);
 
-    // allocate the initial buffer for the window
-    resize_window(initial_width, initial_height);
     int x_offset = 0;
     int y_offset = 0;
 
     while (running) {
-        XEvent general_event = {};
+        XEvent general_event;
         while (XPending(display) > 0) {
             XNextEvent(display, &general_event);
             switch (general_event.type) {
@@ -127,7 +129,8 @@ int main(void) {
 
                 case Expose: {
                     XExposeEvent *event = (XExposeEvent *)&general_event;
-                    resize_window(event->width, event->height);
+                    x_back_buffer.window_width = event->width;
+                    x_back_buffer.window_height = event->height;
                 } break;
 
                 default: {
@@ -135,8 +138,9 @@ int main(void) {
                 } break;
             }
         }
-        render_weird_gradient(display, window, graphics_ctx, x_offset, y_offset);
+        render_weird_gradient(x_back_buffer, display, window, graphics_ctx, x_offset, y_offset);
         x_offset++;
+        y_offset++;
     }
 
     return 0;

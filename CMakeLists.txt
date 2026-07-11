@@ -8,4 +8,7 @@ add_executable(handmade_linux main.c)
 find_package(X11 REQUIRED)
 include_directories(${X11_INCLUDE_DIR})
 link_directories(${X11_LIBRARIES})
-target_link_libraries(handmade_linux ${X11_LIBRARIES})
+target_link_libraries(handmade_linux
+        ${X11_LIBRARIES}
+        ${X11_Xrender_LIB}
+)
