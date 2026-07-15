@@ -1,16 +1,24 @@
+#include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <sys/mman.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrender.h>
+#include <X11/XKBlib.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <linux/input.h>
+#include <unistd.h>
 
 #define internal static
 #define local_persist static
 #define global_variable static
 
-global_variable bool running = true;
+global_variable bool global_running = true;
+global_variable int global_gamepad = -1;
 
 typedef struct {
     u_int8_t *memory;
@@ -89,11 +97,50 @@ internal void render_weird_gradient(x_offscreen_buffer buf, Display *display, Dr
     render_back_buffer(buf, display, window, graphics_ctx);
 }
 
-int main(void) {
+void try_init_gamepad() {
+    FILE *proc = fopen("/proc/bus/input/devices", "r");
 
+    char line[256];
+    int event_number = -1;
+    bool found_ev = false;
+
+    while (fgets(line, sizeof(line), proc)) {
+        // TODO: currently relying on the kernel to label the gamepad with js0 when it is connected
+        // this should be fairly reliable, but it feels a bit hacky
+        // there's probably a better way to detect the event number for a gamepad that I don't know about
+
+        if (line[0] == 'H' && strstr(line, "js0")) {
+            char *event_ptr = strstr(line, "event");
+
+            // there should always be an event number on the handlers line
+            assert(event_ptr);
+
+            char* endptr;
+            event_number = (int)strtol(event_ptr + 5, &endptr, 10);
+
+            found_ev = true;
+            break;
+        }
+    }
+
+    if (found_ev) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/input/event%d", event_number);
+        global_gamepad = open(path, O_RDONLY | O_NONBLOCK);
+
+        if (global_gamepad == -1) {
+            printf("unable to open the gamepad; this is likely due to a permission error. try running the program with root privileges or adding a udev rule for your controller\n");
+        }
+
+    } else {
+        printf("no gamepad detected\n");
+    }
+}
+
+int main(void) {
     Display* display = XOpenDisplay(0);
     Window root_window = XDefaultRootWindow(display);
-    
+
     int screen = DefaultScreen(display);
     GC graphics_ctx = XDefaultGC(display, screen);
 
@@ -115,15 +162,75 @@ int main(void) {
     int x_offset = 0;
     int y_offset = 0;
 
-    while (running) {
+    try_init_gamepad();
+
+    local_persist bool up, down, left, right, start, back, left_shoulder, right_shoulder, a_button, b_button, x_button, y_button;
+    local_persist int32_t stick_x, stick_y;
+
+    // the X server normally spams keyrelease events when a key is held down, which breaks edge detection
+    XkbSetDetectableAutoRepeat(display, true, NULL);
+
+    while (global_running) {
         XEvent general_event;
         while (XPending(display) > 0) {
             XNextEvent(display, &general_event);
             switch (general_event.type) {
-                case KeyPress: {
-                    XKeyPressedEvent *event = (XKeyPressedEvent *)&general_event;
-                    if (event->keycode == XKeysymToKeycode(display, XK_Escape)) {
-                        running = false;
+                case KeyPress:
+                case KeyRelease: {
+                    bool is_pressed = (general_event.type == KeyPress);
+
+                    KeySym sym = XLookupKeysym(&general_event.xkey, 0);
+
+                    switch (sym) {
+                        case 'w': {
+
+                        } break;
+
+                        case 'a': {
+
+                        } break;
+
+                        case 's': {
+
+                        } break;
+
+                        case 'd': {
+
+                        } break;
+
+                        case 'q': {
+
+                        } break;
+
+                        case 'e': {
+
+                        } break;
+
+                        case XK_Up: {
+
+                        } break;
+
+                        case XK_Left: {
+
+                        } break;
+
+                        case XK_Down: {
+
+                        } break;
+
+                        case XK_Escape: {
+                            printf("ESCAPE: ");
+                            if (is_pressed) {
+                                printf("is down");
+                            } else {
+                                printf("is up");
+                            }
+                            printf("\n");
+                        } break;
+
+                        case XK_space: {
+
+                        } break;
                     }
                 } break;
 
@@ -138,9 +245,89 @@ int main(void) {
                 } break;
             }
         }
+
+        if (global_gamepad != -1) {
+            struct input_event events[8];
+            int r1 = read(global_gamepad, events, sizeof(events));
+            if (r1 != -1) {
+                int ev_count = r1/sizeof(struct input_event);
+                for (int evi = 0; evi < ev_count; evi++) {
+                    struct input_event ev = events[evi];
+                    switch (ev.type) {
+                        case EV_ABS: {
+                            switch (ev.code) {
+                                case ABS_X: {
+                                    stick_x = ev.value;
+                                } break;
+
+                                case ABS_Y: {
+                                    stick_y = ev.value;
+                                } break;
+                            }
+                        } break;
+
+                        case EV_KEY: {
+                            switch (ev.code) {
+                                case BTN_DPAD_UP: {
+                                    up = ev.value;
+                                } break;
+
+                                case BTN_DPAD_DOWN: {
+                                    down = ev.value;
+                                } break;
+
+                                case BTN_DPAD_LEFT: {
+                                    left = ev.value;
+                                } break;
+
+                                case BTN_DPAD_RIGHT: {
+                                    right = ev.value;
+                                } break;
+
+                                case BTN_START: {
+                                    start = ev.value;
+                                } break;
+
+                                case BTN_BACK: {
+                                    back = ev.value;
+                                } break;
+
+                                case BTN_GRIPL: {
+                                    left_shoulder = ev.value;
+                                } break;
+
+                                case BTN_GRIPR: {
+                                    right_shoulder = ev.value;
+                                } break;
+
+                                case BTN_A: {
+                                    a_button = ev.value;
+                                } break;
+
+                                case BTN_B: {
+                                    b_button = ev.value;
+                                } break;
+
+                                case BTN_X: {
+                                    y_button = ev.value;
+                                } break;
+
+                                case BTN_Y: {
+                                    y_button = ev.value;
+                                } break;
+                            }
+                        } break;
+                    }
+                }
+            }
+        }
+
+        if (a_button) {
+            y_offset += 2;
+        }
+
         render_weird_gradient(x_back_buffer, display, window, graphics_ctx, x_offset, y_offset);
         x_offset++;
-        y_offset++;
     }
 
     return 0;
